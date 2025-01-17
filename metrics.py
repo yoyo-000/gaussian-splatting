@@ -33,13 +33,12 @@ def readImages(renders_dir, gt_dir):
         image_names.append(fname)
     return renders, gts, image_names
 
-def evaluate(model_paths):
+def evaluate(model_paths, calculate_image_w=False):
 
     full_dict = {}
     per_view_dict = {}
     full_dict_polytopeonly = {}
     per_view_dict_polytopeonly = {}
-    print("")
 
     for scene_dir in model_paths:
         try:
@@ -49,7 +48,7 @@ def evaluate(model_paths):
             full_dict_polytopeonly[scene_dir] = {}
             per_view_dict_polytopeonly[scene_dir] = {}
 
-            test_dir = Path(scene_dir) / "test"
+            test_dir = Path(scene_dir) / "train"
 
             for method in os.listdir(test_dir):
                 print("Method:", method)
@@ -60,8 +59,14 @@ def evaluate(model_paths):
                 per_view_dict_polytopeonly[scene_dir][method] = {}
 
                 method_dir = test_dir / method
-                gt_dir = method_dir/ "gt"
-                renders_dir = method_dir / "renders"
+
+                if calculate_image_w == True:
+                    # 暂时用这个代表白色底的了
+                    gt_dir = method_dir / "gt"
+                    renders_dir = method_dir / "renders"
+                else:
+                    gt_dir = method_dir / "gt-b"
+                    renders_dir = method_dir / "renders-b"
                 renders, gts, image_names = readImages(renders_dir, gt_dir)
 
                 ssims = []
@@ -71,7 +76,7 @@ def evaluate(model_paths):
                 for idx in tqdm(range(len(renders)), desc="Metric evaluation progress"):
                     ssims.append(ssim(renders[idx], gts[idx]))
                     psnrs.append(psnr(renders[idx], gts[idx]))
-                    lpipss.append(lpips(renders[idx], gts[idx], net_type='vgg'))
+                    # lpipss.append(lpips(renders[idx], gts[idx], net_type='vgg'))
 
                 print("  SSIM : {:>12.7f}".format(torch.tensor(ssims).mean(), ".5"))
                 print("  PSNR : {:>12.7f}".format(torch.tensor(psnrs).mean(), ".5"))
@@ -84,10 +89,15 @@ def evaluate(model_paths):
                 per_view_dict[scene_dir][method].update({"SSIM": {name: ssim for ssim, name in zip(torch.tensor(ssims).tolist(), image_names)},
                                                             "PSNR": {name: psnr for psnr, name in zip(torch.tensor(psnrs).tolist(), image_names)},
                                                             "LPIPS": {name: lp for lp, name in zip(torch.tensor(lpipss).tolist(), image_names)}})
-
-            with open(scene_dir + "/results.json", 'w') as fp:
+            if calculate_image_w == True:
+                results_file = "/results-w.json"
+                per_view_file = "/per_view-w.json"
+            else:
+                results_file = "/results-b.json"
+                per_view_file = "/per_view-b.json"
+            with open(scene_dir + results_file, 'w') as fp:
                 json.dump(full_dict[scene_dir], fp, indent=True)
-            with open(scene_dir + "/per_view.json", 'w') as fp:
+            with open(scene_dir + per_view_file, 'w') as fp:
                 json.dump(per_view_dict[scene_dir], fp, indent=True)
         except:
             print("Unable to compute metrics for model", scene_dir)
@@ -99,5 +109,14 @@ if __name__ == "__main__":
     # Set up command line argument parser
     parser = ArgumentParser(description="Training script parameters")
     parser.add_argument('--model_paths', '-m', required=True, nargs="+", type=str, default=[])
+    parser.add_argument("--calculate_image_w",'-w', action="store_true", help="If set, it will calculate white bg result.")
     args = parser.parse_args()
-    evaluate(args.model_paths)
+
+    if args.calculate_image_w==True:
+        print("Calculate black bg res, default dir name is gt/renders-b.")
+        evaluate(args.model_paths)
+        print("Calculate white bg res, default dir name is gt/renders.")
+        evaluate(args.model_paths, args.calculate_image_w)
+    else:
+        print("Calculate black bg res, default dir name is gt/renders-b.")
+        evaluate(args.model_paths)

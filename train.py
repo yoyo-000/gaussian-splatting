@@ -11,6 +11,8 @@
 
 import os
 import torch
+import logging
+import datetime
 from random import randint
 from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, network_gui
@@ -28,7 +30,18 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+start_time = datetime.datetime.now()
+def log_message(logger, message):
+    elapsed_time = datetime.datetime.now() - start_time
+    elapsed_seconds = int(elapsed_time.total_seconds())
+    hours = elapsed_seconds // 3600
+    minutes = (elapsed_seconds % 3600) // 60
+    seconds = elapsed_seconds % 60
+    formatted_time = f"{hours:02}:{minutes:02}:{seconds:02}"
+    logger.info(message, extra={'elapsed_time': formatted_time})
+
+
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, use_mask,use_image_w):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
@@ -43,6 +56,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
+
+    log_training = os.path.join(dataset.model_path, "log_training.txt")
+    if os.path.exists(log_training):
+        os.remove(log_training)
+    with open(log_training, 'a') as f:
+        f.write(f"Epoch, Loss\n")
+
+    logger_evaluating = logging.getLogger('logger_evaluating')
+    logger_evaluating.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s - Total Time: %(elapsed_time)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    file_handler_evaluating = logging.FileHandler(os.path.join(dataset.model_path, "log_evaluating.txt"))
+    file_handler_evaluating.setFormatter(formatter)
+    logger_evaluating.addHandler(file_handler_evaluating)
+    log_message(logger_evaluating, f"Epoch, L1, PSNR")
 
     viewpoint_stack = None
     ema_loss_for_log = 0.0
@@ -83,11 +110,41 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         render_pkg = render(viewpoint_cam, gaussians, pipe, background)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
-        # Loss
-        gt_image = viewpoint_cam.original_image.cuda()
-        Ll1 = l1_loss(image, gt_image)
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+        # mask
+        if use_mask:
+            if viewpoint_cam.mask is not None:
+                mask = viewpoint_cam.mask.cuda()
+            else:
+                return
+        else:
+            mask = None
+
+        # load gt_image
+        gt_image = viewpoint_cam.original_image.cuda(non_blocking=True)
+        
+        # load gt_image_w
+        if use_image_w:
+            if viewpoint_cam.image_w is not None:
+                gt_image_w = viewpoint_cam.image_w.cuda(non_blocking=True)
+            else:
+                return
+        else:
+            gt_image_w = None
+        
+        # Loss1
+        Ll1 = l1_loss(image, gt_image, mask)
+        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image, mask=mask))
         loss.backward()
+
+        # Loss2
+        if use_image_w:
+            bg_color_w = [1, 1, 1]
+            background_w = torch.tensor(bg_color_w, dtype=torch.float32, device="cuda")
+            render_pkg_w = render(viewpoint_cam, gaussians, pipe, background_w)
+            image_w_render = render_pkg_w["render"]
+            Ll1 = l1_loss(image_w_render, gt_image_w, mask)
+            loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image_w_render, gt_image_w, mask=mask))
+            loss.backward()
 
         iter_end.record()
 
@@ -101,7 +158,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.close()
 
             # Log and save
-            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
+            training_report(logger_evaluating, tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
@@ -128,6 +185,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
+            with open(log_training, 'a') as f:
+                f.write(f"{iteration}, {ema_loss_for_log}\n")
+
 def prepare_output_and_logger(args):    
     if not args.model_path:
         if os.getenv('OAR_JOB_ID'):
@@ -150,7 +210,7 @@ def prepare_output_and_logger(args):
         print("Tensorboard not available: not logging progress")
     return tb_writer
 
-def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs):
+def training_report(logger_evaluating, tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs):
     if tb_writer:
         tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
@@ -178,6 +238,9 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                 psnr_test /= len(config['cameras'])
                 l1_test /= len(config['cameras'])          
                 print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
+
+                log_message(logger_evaluating, f"{iteration}, {l1_test}, {psnr_test}")
+
                 if tb_writer:
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
@@ -197,11 +260,13 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[100,1_000,5_000,10_000,15_000,20_000,25_000,30_000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[100,10_000,20_000,25_000,30_000])
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
+    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[20000])
     parser.add_argument("--start_checkpoint", type=str, default = None)
+    parser.add_argument("--use_mask", action="store_true", help="If set, it will use mask.")
+    parser.add_argument("--use_image_w", action="store_true", help="If set, it will use mask.")
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     
@@ -213,7 +278,7 @@ if __name__ == "__main__":
     # Start GUI server, configure and run training
     network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.use_mask, args.use_image_w)
 
     # All done
     print("\nTraining complete.")

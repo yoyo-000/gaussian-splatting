@@ -3,7 +3,7 @@
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
 #
-# This software is free for non-commercial, research and evaluation use 
+# This software is free for non-commercial, research and evaluation use
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
@@ -22,6 +22,7 @@ from pathlib import Path
 from plyfile import PlyData, PlyElement
 from utils.sh_utils import SH2RGB
 from scene.gaussian_model import BasicPointCloud
+import re
 
 class CameraInfo(NamedTuple):
     uid: int
@@ -34,6 +35,8 @@ class CameraInfo(NamedTuple):
     image_name: str
     width: int
     height: int
+    mask: np.array
+    image_w: np.array
 
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
@@ -66,6 +69,16 @@ def getNerfppNorm(cam_info):
     return {"translate": translate, "radius": radius}
 
 def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
+    mask_folder = os.path.join(os.path.dirname(images_folder), "masks")
+    load_mask = False
+    if os.path.exists(mask_folder):
+        load_mask = True
+
+    image_w_folder = os.path.join(os.path.dirname(images_folder), "images-w")
+    load_image_w = False
+    if os.path.exists(image_w_folder):
+        load_image_w = True
+
     cam_infos = []
     for idx, key in enumerate(cam_extrinsics):
         sys.stdout.write('\r')
@@ -91,15 +104,36 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
             focal_length_y = intr.params[1]
             FovY = focal2fov(focal_length_y, height)
             FovX = focal2fov(focal_length_x, width)
+        elif intr.model=="SIMPLE_RADIAL":
+            focal_length_x = intr.params[0]
+            focal_length_y = intr.params[1]
+            FovY = focal2fov(focal_length_y, height)
+            FovX = focal2fov(focal_length_x, width)
         else:
             assert False, "Colmap camera model not handled: only undistorted datasets (PINHOLE or SIMPLE_PINHOLE cameras) supported!"
 
-        image_path = os.path.join(images_folder, os.path.basename(extr.name))
-        image_name = os.path.basename(image_path).split(".")[0]
+        image_name = extr.name.split(".")[0]
+        image_names = os.listdir(images_folder)
+        matched_files = [f for f in image_names if re.match(image_name, f)]
+        image_path = os.path.join(images_folder, matched_files[0])
         image = Image.open(image_path)
 
+        mask = None
+        if load_mask:
+            mask_names = os.listdir(mask_folder)
+            matched_files = [f for f in mask_names if re.match(image_name, f)]
+            mask_path = os.path.join(mask_folder, matched_files[0])
+            mask = Image.open(mask_path).convert("L")
+
+        image_w = None
+        if load_image_w:
+            image_w_names = os.listdir(image_w_folder)
+            matched_files = [f for f in image_w_names if re.match(image_name, f)]
+            image_w_path = os.path.join(image_w_folder, matched_files[0])
+            image_w = Image.open(image_w_path)
+
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
-                              image_path=image_path, image_name=image_name, width=width, height=height)
+                              image_path=image_path, image_name=image_name, width=width, height=height, mask=mask, image_w=image_w)
         cam_infos.append(cam_info)
     sys.stdout.write('\n')
     return cam_infos

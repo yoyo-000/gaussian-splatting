@@ -23,13 +23,14 @@ def loadCam(args, id, cam_info, resolution_scale):
         resolution = round(orig_w/(resolution_scale * args.resolution)), round(orig_h/(resolution_scale * args.resolution))
     else:  # should be a type that converts to float
         if args.resolution == -1:
-            if orig_w > 1600:
+            max_width = 1600
+            if orig_w > max_width:
                 global WARNED
                 if not WARNED:
-                    print("[ INFO ] Encountered quite large input images (>1.6K pixels width), rescaling to 1.6K.\n "
+                    print(f"[ INFO ] Encountered quite large input images, rescaling to {max_width}.\n "
                         "If this is not desired, please explicitly specify '--resolution/-r' as 1")
                     WARNED = True
-                global_down = orig_w / 1600
+                global_down = orig_w / max_width
             else:
                 global_down = 1
         else:
@@ -46,10 +47,20 @@ def loadCam(args, id, cam_info, resolution_scale):
     if resized_image_rgb.shape[1] == 4:
         loaded_mask = resized_image_rgb[3:4, ...]
 
+    resized_image_mask = None
+    if cam_info.mask is not None:
+        resized_image_mask = PILtoTorch(cam_info.mask, resolution)
+
+    resized_image_w = None
+    if cam_info.image_w is not None:
+        resized_image_w = PILtoTorch(cam_info.image_w, resolution)
+        resized_image_w = resized_image_w[:3, ...]
+
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
                   image=gt_image, gt_alpha_mask=loaded_mask,
-                  image_name=cam_info.image_name, uid=id, data_device=args.data_device)
+                  image_name=cam_info.image_name, uid=id, data_device=args.data_device,
+                  mask=resized_image_mask,image_w=resized_image_w)
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args):
     camera_list = []

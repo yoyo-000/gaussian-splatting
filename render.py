@@ -21,32 +21,40 @@ from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer import GaussianModel
 
-def render_set(model_path, name, iteration, views, gaussians, pipeline, background):
-    render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
-    gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
+def render_set(model_path, name, iteration, views, gaussians, pipeline, background, white_bg_flag):
+    if white_bg_flag:
+        render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
+        gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
+    else:
+        render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders-b")
+        gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt-b")
 
     makedirs(render_path, exist_ok=True)
     makedirs(gts_path, exist_ok=True)
 
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         rendering = render(view, gaussians, pipeline, background)["render"]
-        gt = view.original_image[0:3, :, :]
+        if white_bg_flag:
+            gt = view.image_w[0:3, :, :]
+        else:
+            gt = view.original_image[0:3, :, :]
         torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
 
-def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool):
+def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, white_bg_flag):
     with torch.no_grad():
         gaussians = GaussianModel(dataset.sh_degree)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
 
-        bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
+        bg_color = [1,1,1] if white_bg_flag else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
         if not skip_train:
-             render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background)
+            render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background, white_bg_flag)
 
         if not skip_test:
-             render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background)
+            render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background, white_bg_flag)
+
 
 if __name__ == "__main__":
     # Set up command line argument parser
@@ -57,10 +65,20 @@ if __name__ == "__main__":
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_test", action="store_true")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--calculate_image_w", action="store_true", help="If set, it will render white bg result.")
     args = get_combined_args(parser)
     print("Rendering " + args.model_path)
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
-    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test)
+    # render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test)
+
+    if args.calculate_image_w==True:
+        print("Calculate black bg res, default dir name is gt/renders-b.")
+        render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, False)
+        print("Calculate white bg res, default dir name is gt/renders.")
+        render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, True)
+    else:
+        print("Calculate black bg res, default dir name is gt/renders-b.")
+        render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, False)
